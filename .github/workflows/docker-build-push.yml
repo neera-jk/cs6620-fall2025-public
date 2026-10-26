@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Docker Build, Push, and Deploy
 
 on:
   push:
@@ -37,3 +37,37 @@ jobs:
             build.workflow=${{ github.workflow }}
             build.run_id=${{ github.run_id }}
             build.run_number=${{ github.run_number }}
+
+  deploy:
+    name: Deploy to EC2 via SSM
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Send deploy command to EC2
+        id: send_command
+        run: |
+          IMAGE_NAME="${{ secrets.DOCKERHUB_USERNAME }}/cs6620-app:latest"
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy cs6620-app from GitHub Actions run ${{ github.run_id }}" \
+            --parameters "commands=[\"docker pull $IMAGE_NAME\",\"docker stop cs6620-app || true\",\"docker rm cs6620-app || true\",\"docker run -d --name cs6620-app -p 80:5000 --restart unless-stopped $IMAGE_NAME\"]" \
+            --query "Command.CommandId" \
+            --output text)
+          echo "Sent command: $COMMAND_ID"
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for deployment to finish
+        run: |
+          aws ssm wait command-executed \
+            --command-id "${{ steps.send_command.outputs.command_id }}" \
+            --instance-id "${{ secrets.EC2_INSTANCE_ID }}"
+          echo "Deployment finished successfully"
